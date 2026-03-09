@@ -1,0 +1,93 @@
+:root {
+  font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+  color: #1f2937;
+  background: #f3f4f6;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+.container {
+  max-width: 720px;
+  margin: 32px auto;
+  padding: 0 16px 24px;
+}
+
+h1 {
+  margin: 0 0 8px;
+  font-size: 1.8rem;
+}
+
+.subtext {
+  margin: 0 0 20px;
+  color: #6b7280;
+}
+
+.card {
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+form label {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 12px;
+}
+
+input {
+  width: 100%;
+  margin-top: 6px;
+  padding: 10px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+}
+
+button {
+  padding: 10px 14px;
+  border: 0;
+  border-radius: 6px;
+  background: #1f2937;
+  color: #ffffff;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+
+h2 {
+  margin-top: 0;
+  font-size: 1.1rem;
+}
+
+pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  padding: 12px;
+}
+
+ul {
+  margin: 0;
+  padding-left: 18px;
+  max-height: 240px;
+  overflow: auto;
+}
+
+li {
+  margin-bottom: 6px;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 0.9rem;
+}
