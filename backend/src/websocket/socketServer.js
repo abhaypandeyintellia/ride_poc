@@ -1,5 +1,6 @@
 import { WebSocketServer } from "ws";
 import redis from "../config/redis.js";
+import { clearAssignmentTimeout, dispatchNextDriver } from "../services/rideService.js";
 
 export const driverSockets = new Map();
 const observerSockets = new Set();
@@ -47,6 +48,21 @@ export function initWebSocket(server) {
       if (msg.type === "ACCEPT_RIDE") {
 
         const { rideId, driverId } = msg;
+        const ride = await redis.hGetAll(`ride:${rideId}`);
+
+        if (ride.state !== "DRIVER_ASSIGNED" || ride.assignedDriver !== driverId) {
+          ws.send(JSON.stringify({
+            type: "RIDE_NOT_ASSIGNED",
+            rideId
+          }));
+          publishEvent({
+            action: "RIDE_NOT_ASSIGNED",
+            rideId,
+            driverId
+          });
+          return;
+        }
+
         publishEvent({
           action: "DRIVER_ACCEPT_ATTEMPT",
           rideId,
@@ -60,6 +76,11 @@ export function initWebSocket(server) {
         );
 
         if (lock) {
+          clearAssignmentTimeout(rideId);
+          await redis.hSet(`ride:${rideId}`, {
+            state: "ACCEPTED"
+          });
+
           const claimedMessage = {
             type: "RIDE_CLAIMED",
             rideId,
@@ -91,6 +112,38 @@ export function initWebSocket(server) {
           });
 
         }
+      }
+
+      if (msg.type === "DRIVER_CANCEL_RIDE") {
+        const { rideId, driverId } = msg;
+        const ride = await redis.hGetAll(`ride:${rideId}`);
+
+        if (ride.state !== "DRIVER_ASSIGNED" || ride.assignedDriver !== driverId) {
+          ws.send(JSON.stringify({
+            type: "RIDE_NOT_ASSIGNED",
+            rideId
+          }));
+          publishEvent({
+            action: "DRIVER_CANCEL_REJECTED",
+            rideId,
+            driverId
+          });
+          return;
+        }
+
+        clearAssignmentTimeout(rideId);
+        await redis.hSet(`ride:${rideId}`, {
+          state: "SEARCHING",
+          assignedDriver: ""
+        });
+
+        publishEvent({
+          action: "DRIVER_CANCELLED",
+          rideId,
+          driverId
+        });
+
+        await dispatchNextDriver(rideId);
       }
 
     });
