@@ -1,6 +1,6 @@
 import { WebSocketServer } from "ws";
 import redis from "../config/redis.js";
-import { clearAssignmentTimeout, dispatchNextDriver } from "../services/rideService.js";
+import { clearAssignmentTimeout, queueDispatchNext } from "../services/rideService.js";
 
 export const driverSockets = new Map();
 const observerSockets = new Set();
@@ -143,7 +143,7 @@ export function initWebSocket(server) {
           driverId
         });
 
-        await dispatchNextDriver(rideId);
+        await queueDispatchNext(rideId);
       }
 
     });

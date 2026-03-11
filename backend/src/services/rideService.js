@@ -1,13 +1,45 @@
 import { v4 as uuid } from "uuid";
-import { findNearbyDrivers } from "./driverService.js";
 import { driverSockets, publishEvent } from "../websocket/socketServer.js";
 import redis from "../config/redis.js";
 
 const ASSIGNMENT_TTL_MS = 10000;
 const assignmentTimers = new Map();
+const DISPATCH_STREAM = "rides:dispatch";
+const DRIVER_BATCH_FIRST = 5;
+const DRIVER_BATCH_NEXT = 10;
+const DRIVER_MAX_TOTAL = 30;
+const CANDIDATE_TTL_SEC = 180;
 
 function rideKey(rideId) {
   return `ride:${rideId}`;
+}
+
+function candidateKey(rideId) {
+  return `ride:${rideId}:candidates`;
+}
+
+async function enqueueDispatch(action, fields) {
+  const args = ["XADD", DISPATCH_STREAM, "*", "type", action];
+  for (const [key, value] of Object.entries(fields)) {
+    args.push(key, String(value));
+  }
+  await redis.sendCommand(args);
+}
+
+export async function seedRideCandidates(rideId, lat, lon, radiusKm) {
+  const key = candidateKey(rideId);
+  await redis.sendCommand([
+    "GEOSEARCHSTORE",
+    key,
+    "drivers:locations",
+    "FROMLONLAT", String(lon), String(lat),
+    "BYRADIUS", String(radiusKm), "km",
+    "STOREDIST",
+    "ASC",
+    "COUNT", String(DRIVER_MAX_TOTAL)
+  ]);
+  await redis.expire(key, CANDIDATE_TTL_SEC);
+  await redis.hSet(rideKey(rideId), { candidatesSeeded: "1" });
 }
 
 function scheduleAssignmentTimeout(rideId, driverId) {
@@ -43,28 +75,37 @@ async function handleAssignmentTimeout(rideId, driverId) {
     assignedDriver: ""
   });
 
-  await dispatchNextDriver(rideId);
+  await queueDispatchNext(rideId);
 }
 
-export async function dispatchRide(lat, lon, radii = "5") {
+export async function dispatchRide(lat, lon, radii = "2") {
   const rideId = uuid();
-  const drivers = await findNearbyDrivers(lat, lon, radii);
+  const radiusKm = Number(radii);
+  if (!Number.isFinite(radiusKm)) {
+    throw new Error("Invalid radius");
+  }
 
   await redis.hSet(rideKey(rideId), {
     state: "SEARCHING",
     pickupLat: String(lat),
     pickupLon: String(lon),
-    drivers: JSON.stringify(drivers),
+    radiusKm: String(radiusKm),
     cursor: "0",
-    assignedDriver: ""
+    assignedDriver: "",
+    candidatesSeeded: "0"
   });
 
-  const assignedDriver = await dispatchNextDriver(rideId);
+  await enqueueDispatch("RIDE_DISPATCH_REQUEST", {
+    rideId,
+    lat,
+    lon,
+    radiusKm
+  });
 
   return {
     rideId,
-    driversNotified: assignedDriver ? 1 : 0,
-    assignedDriver
+    driversNotified: 0,
+    assignedDriver: null
   };
 }
 
@@ -73,53 +114,84 @@ export async function dispatchNextDriver(rideId) {
   if (ride.state === "CLOSED" || ride.state === "ACCEPTED") {
     return null;
   }
-  const drivers = JSON.parse(ride.drivers || "[]");
   let cursor = Number(ride.cursor || "0");
   const pickup = {
     lat: Number(ride.pickupLat),
     lon: Number(ride.pickupLon)
   };
 
-  while (cursor < drivers.length) {
-    const driverId = drivers[cursor];
-    cursor += 1;
+  if (!Number.isFinite(cursor)) {
+    cursor = 0;
+  }
 
-    const ws = driverSockets.get(driverId);
-    if (!ws || ws.readyState !== 1) {
-      continue;
+  if (ride.candidatesSeeded !== "1") {
+    await seedRideCandidates(rideId, pickup.lat, pickup.lon, Number(ride.radiusKm || "2"));
+  }
+
+  while (true) {
+    const remaining = DRIVER_MAX_TOTAL - cursor;
+    const requested = cursor === 0 ? DRIVER_BATCH_FIRST : DRIVER_BATCH_NEXT;
+    const batchSize = Math.max(0, Math.min(requested, remaining));
+
+    if (batchSize === 0) {
+      break;
+    }
+
+    const batch = await redis.sendCommand([
+      "ZRANGE",
+      candidateKey(rideId),
+      String(cursor),
+      String(cursor + batchSize - 1)
+    ]);
+
+    if (!batch || batch.length === 0) {
+      break;
+    }
+
+    for (const driverId of batch) {
+      cursor += 1;
+
+      const ws = driverSockets.get(driverId);
+      if (!ws || ws.readyState !== 1) {
+        continue;
+      }
+
+      await redis.hSet(rideKey(rideId), {
+        state: "DRIVER_ASSIGNED",
+        assignedDriver: driverId,
+        cursor: String(cursor)
+      });
+
+      const message = JSON.stringify({
+        type: "RIDE_REQUEST",
+        rideId,
+        pickup,
+        assignmentExpiresInMs: ASSIGNMENT_TTL_MS
+      });
+
+      ws.send(message);
+      scheduleAssignmentTimeout(rideId, driverId);
+
+      publishEvent({
+        action: "DRIVER_ASSIGNED",
+        rideId,
+        driverId
+      });
+
+      publishEvent({
+        action: "RIDE_REQUEST_DISPATCHED",
+        rideId,
+        pickup,
+        driversNotified: 1,
+        drivers: [driverId]
+      });
+
+      return driverId;
     }
 
     await redis.hSet(rideKey(rideId), {
-      state: "DRIVER_ASSIGNED",
-      assignedDriver: driverId,
       cursor: String(cursor)
     });
-
-    const message = JSON.stringify({
-      type: "RIDE_REQUEST",
-      rideId,
-      pickup,
-      assignmentExpiresInMs: ASSIGNMENT_TTL_MS
-    });
-
-    ws.send(message);
-    scheduleAssignmentTimeout(rideId, driverId);
-
-    publishEvent({
-      action: "DRIVER_ASSIGNED",
-      rideId,
-      driverId
-    });
-
-    publishEvent({
-      action: "RIDE_REQUEST_DISPATCHED",
-      rideId,
-      pickup,
-      driversNotified: 1,
-      drivers: [driverId]
-    });
-
-    return driverId;
   }
 
   await redis.hSet(rideKey(rideId), {
@@ -134,6 +206,10 @@ export async function dispatchNextDriver(rideId) {
   });
 
   return null;
+}
+
+export async function queueDispatchNext(rideId) {
+  await enqueueDispatch("RIDE_DISPATCH_NEXT", { rideId });
 }
 
 export async function cancelRide(rideId, reason = "RIDER_CANCELLED") {
